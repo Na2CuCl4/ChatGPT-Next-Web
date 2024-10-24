@@ -46,6 +46,7 @@ import StyleIcon from "../icons/palette.svg";
 import PluginIcon from "../icons/plugin.svg";
 import ShortcutkeyIcon from "../icons/shortcutkey.svg";
 import ReloadIcon from "../icons/reload.svg";
+import UploadDocIcon from "../icons/upload-doc.svg";
 
 import {
   ChatMessage,
@@ -68,13 +69,18 @@ import {
   useMobileScreen,
   getMessageTextContent,
   getMessageImages,
+  getMessageFiles,
   isVisionModel,
   isDalle3,
   showPlugins,
   safeLocalStorage,
+  countTokens,
 } from "../utils";
 
+import type { UploadFile } from "../client/api";
+
 import { uploadImage as uploadImageRemote } from "@/app/utils/chat";
+import { uploadImage as uploadFileRemote } from "@/app/utils/chat";
 
 import dynamic from "next/dynamic";
 
@@ -96,6 +102,8 @@ import {
   showToast,
 } from "./ui-lib";
 import { useNavigate } from "react-router-dom";
+import { FileIcon, defaultStyles } from "react-file-icon";
+import type { DefaultExtensionType } from "react-file-icon";
 import {
   CHAT_PAGE_SIZE,
   DEFAULT_TTS_ENGINE,
@@ -445,8 +453,10 @@ function useScrollToBottom(
 }
 
 export function ChatActions(props: {
+  uploadDocument: () => void;
   uploadImage: () => void;
   setAttachImages: (images: string[]) => void;
+  setAttachFiles: (files: UploadFile[]) => void;
   setUploading: (uploading: boolean) => void;
   showPromptModal: () => void;
   scrollToBottom: () => void;
@@ -580,6 +590,11 @@ export function ChatActions(props: {
           icon={props.uploading ? <LoadingButtonIcon /> : <ImageIcon />}
         />
       )}
+      <ChatAction
+        onClick={props.uploadDocument}
+        text={"Upload Plain Text File"}
+        icon={props.uploading ? <LoadingButtonIcon /> : <UploadDocIcon />}
+      />
       <ChatAction
         onClick={nextTheme}
         text={Locale.Chat.InputActions.Theme[theme]}
@@ -948,6 +963,7 @@ function _Chat() {
   const isMobileScreen = useMobileScreen();
   const navigate = useNavigate();
   const [attachImages, setAttachImages] = useState<string[]>([]);
+  const [attachFiles, setAttachFiles] = useState<UploadFile[]>([]);
   const [uploading, setUploading] = useState(false);
 
   // prompt hints
@@ -1028,9 +1044,10 @@ function _Chat() {
     }
     setIsLoading(true);
     chatStore
-      .onUserInput(userInput, attachImages)
+      .onUserInput(userInput, attachImages, attachFiles)
       .then(() => setIsLoading(false));
     setAttachImages([]);
+    setAttachFiles([]);
     chatStore.setLastInput(userInput);
     setUserInput("");
     setPromptHints([]);
@@ -1180,7 +1197,9 @@ function _Chat() {
     setIsLoading(true);
     const textContent = getMessageTextContent(userMessage);
     const images = getMessageImages(userMessage);
-    chatStore.onUserInput(textContent, images).then(() => setIsLoading(false));
+    chatStore
+      .onUserInput(textContent, images, attachFiles)
+      .then(() => setIsLoading(false));
     inputRef.current?.focus();
   };
 
@@ -1462,6 +1481,54 @@ function _Chat() {
     },
     [attachImages, chatStore],
   );
+
+  async function uploadDocument() {
+    const files: UploadFile[] = [];
+    files.push(...attachFiles);
+
+    files.push(
+      ...(await new Promise<UploadFile[]>((res, rej) => {
+        const fileInput = document.createElement("input");
+        fileInput.type = "file";
+        fileInput.accept = "text/*";
+        fileInput.multiple = true;
+        fileInput.onchange = (event: any) => {
+          setUploading(true);
+          const inputFiles = event.target.files;
+          const imagesData: UploadFile[] = [];
+          (async () => {
+            for (let i = 0; i < inputFiles.length; i++) {
+              const file = inputFiles[i];
+              try {
+                const dataUrl = await uploadFileRemote(file);
+                const fileData: UploadFile = { name: file.name, url: dataUrl };
+                const tokenCount: number = await countTokens(fileData);
+                fileData.tokenCount = tokenCount;
+                imagesData.push(fileData);
+                if (
+                  imagesData.length === 3 ||
+                  imagesData.length === inputFiles.length
+                ) {
+                  setUploading(false);
+                  res(imagesData);
+                }
+              } catch (e) {
+                setUploading(false);
+                rej(e);
+              }
+            }
+          })();
+        };
+        fileInput.click();
+      })),
+    );
+
+    const filesLength = files.length;
+    if (filesLength > 3) {
+      files.splice(3, filesLength - 3);
+    }
+    setAttachFiles(files);
+  }
 
   async function uploadImage() {
     const images: string[] = [];
@@ -1882,6 +1949,41 @@ function _Chat() {
                         })}
                       </div>
                     )}
+                    {getMessageFiles(message).length > 0 && (
+                      <div className={styles["chat-message-item-files"]}>
+                        {getMessageFiles(message).map((file, index) => {
+                          const extension: DefaultExtensionType = file.name
+                            .split(".")
+                            .pop()
+                            ?.toLowerCase() as DefaultExtensionType;
+                          const style = defaultStyles[extension];
+                          return (
+                            <a
+                              href={file.url}
+                              target="_blank"
+                              key={index}
+                              className={styles["chat-message-item-file"]}
+                            >
+                              <div
+                                className={
+                                  styles["chat-message-item-file-icon"] +
+                                  " no-dark"
+                                }
+                              >
+                                <FileIcon {...style} glyphColor="#303030" />
+                              </div>
+                              <div
+                                className={
+                                  styles["chat-message-item-file-name"]
+                                }
+                              >
+                                {file.name} {file.tokenCount}K
+                              </div>
+                            </a>
+                          );
+                        })}
+                      </div>
+                    )}
                   </div>
 
                   <div className={styles["chat-message-action-date"]}>
@@ -1901,8 +2003,10 @@ function _Chat() {
         <PromptHints prompts={promptHints} onPromptSelect={onPromptSelect} />
 
         <ChatActions
+          uploadDocument={uploadDocument}
           uploadImage={uploadImage}
           setAttachImages={setAttachImages}
+          setAttachFiles={setAttachFiles}
           setUploading={setUploading}
           showPromptModal={() => setShowPromptModal(true)}
           scrollToBottom={scrollToBottom}
@@ -1924,7 +2028,7 @@ function _Chat() {
         />
         <label
           className={`${styles["chat-input-panel-inner"]} ${
-            attachImages.length != 0
+            attachImages.length != 0 || attachFiles.length != 0
               ? styles["chat-input-panel-inner-attach"]
               : ""
           }`}
@@ -1948,29 +2052,82 @@ function _Chat() {
               fontFamily: config.fontFamily,
             }}
           />
-          {attachImages.length != 0 && (
-            <div className={styles["attach-images"]}>
-              {attachImages.map((image, index) => {
-                return (
-                  <div
-                    key={index}
-                    className={styles["attach-image"]}
-                    style={{ backgroundImage: `url("${image}")` }}
-                  >
-                    <div className={styles["attach-image-mask"]}>
-                      <DeleteImageButton
-                        deleteImage={() => {
-                          setAttachImages(
-                            attachImages.filter((_, i) => i !== index),
-                          );
-                        }}
-                      />
+          <div className={styles["attachments"]}>
+            {attachImages.length != 0 && (
+              <div className={styles["attach-images"]}>
+                {attachImages.map((image, index) => {
+                  return (
+                    <div
+                      key={index}
+                      className={styles["attach-image"]}
+                      style={{ backgroundImage: `url("${image}")` }}
+                    >
+                      <div className={styles["attach-image-mask"]}>
+                        <DeleteImageButton
+                          deleteImage={() => {
+                            setAttachImages(
+                              attachImages.filter((_, i) => i !== index),
+                            );
+                          }}
+                        />
+                      </div>
                     </div>
-                  </div>
-                );
-              })}
-            </div>
-          )}
+                  );
+                })}
+              </div>
+            )}
+            {attachFiles.length != 0 && (
+              <div className={styles["attach-files"]}>
+                {attachFiles.map((file, index) => {
+                  const extension: DefaultExtensionType = file.name
+                    .split(".")
+                    .pop()
+                    ?.toLowerCase() as DefaultExtensionType;
+                  const style = defaultStyles[extension];
+                  return (
+                    <div key={index} className={styles["attach-file"]}>
+                      <div
+                        className={styles["attach-file-icon"] + " no-dark"}
+                        key={extension}
+                      >
+                        <FileIcon {...style} glyphColor="#303030" />
+                      </div>
+                      {attachImages.length == 0 && (
+                        <div className={styles["attach-file-name-full"]}>
+                          {file.name} {file.tokenCount}K
+                        </div>
+                      )}
+                      {attachImages.length == 1 && (
+                        <div className={styles["attach-file-name-half"]}>
+                          {file.name} {file.tokenCount}K
+                        </div>
+                      )}
+                      {attachImages.length == 2 && (
+                        <div className={styles["attach-file-name-less"]}>
+                          {file.name} {file.tokenCount}K
+                        </div>
+                      )}
+                      {attachImages.length == 3 && (
+                        <div className={styles["attach-file-name-min"]}>
+                          {file.name} {file.tokenCount}K
+                        </div>
+                      )}
+
+                      <div className={styles["attach-image-mask"]}>
+                        <DeleteImageButton
+                          deleteImage={() => {
+                            setAttachFiles(
+                              attachFiles.filter((_, i) => i !== index),
+                            );
+                          }}
+                        />
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+          </div>
           <IconButton
             icon={<SendWhiteIcon />}
             text={Locale.Chat.Send}
